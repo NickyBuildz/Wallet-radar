@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#0b1220" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <title>Wallet Radar</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%20100%20100'%3E%3Ctext%20y='0.9em'%20font-size='90'%3E%F0%9F%93%A1%3C/text%3E%3C/svg%3E" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header>
+    <h1>📡 Wallet Radar</h1>
+    <span id="status-pill">Idle</span>
+    <button id="btn-help" class="btn small">Help &amp; setup</button>
+  </header>
+
+  <!-- ============================================= SETUP (unsupported) -->
+  <section id="screen-setup" class="hidden">
+    <h2 class="screen-title">One-time setup needed</h2>
+    <p class="subtle">
+      This browser can't reach Bluetooth yet. Here's what it reports, and how to fix it below —
+      it's a couple of browser flags, about 2 minutes.
+    </p>
+    <ul id="support-list"></ul>
+    <button id="btn-recheck" class="btn primary">↻ I fixed it — re-check</button>
+    <div id="setup-instructions"></div>
+  </section>
+
+  <!-- ======================================================== SCAN LIST -->
+  <section id="screen-scan" class="hidden">
+    <div id="tip-card" class="tip-card hidden">
+      <button id="btn-tip-dismiss" class="close-x" aria-label="Dismiss tip">✕</button>
+      <b>Looking for a Find My wallet card?</b> It broadcasts as an <i>unnamed device</i> with a
+      <span class="badge badge-findmy">Find My</span> badge. Important: trackers go <b>silent while
+      connected to their owner's iPhone</b> — turn that iPhone's Bluetooth OFF
+      (Settings&nbsp;→&nbsp;Bluetooth), wait a minute or two, then start scanning and tap
+      <b>🎯 Track strongest Find My signal</b>.
+    </div>
+
+    <div id="no-stream-banner" class="banner warn hidden">
+      Bluetooth exists here, but this browser can't <i>stream</i> signal strength yet — that needs
+      one Chrome flag. Tap <b>Help &amp; setup</b> (top right) for the 2-minute fix.
+    </div>
+
+    <div id="adapter-note" class="banner warn hidden">
+      No Bluetooth adapter is available to this browser right now. Make sure Bluetooth is switched
+      on for this device.
+    </div>
+
+    <div class="controls">
+      <button id="btn-scan" class="btn primary">▶ Start scanning</button>
+      <button id="btn-add-device" class="btn">＋ Add one device</button>
+      <button id="btn-stop" class="btn hidden">⏹ Stop</button>
+    </div>
+    <div class="controls">
+      <button id="btn-auto" class="btn">🎯 Track strongest Find My signal</button>
+    </div>
+
+    <div id="scan-stalled" class="banner hidden">
+      <span id="scan-stalled-text"></span>
+      <div style="margin-top:8px">
+        <button id="btn-restart-scan" class="btn small">↻ Restart scan</button>
+      </div>
+    </div>
+
+    <div class="list-meta">
+      <span id="scan-counts"></span>
+      <label><input type="checkbox" id="chk-findmy-only" /> Find My only</label>
+    </div>
+
+    <div id="scan-empty" class="empty hidden">
+      Listening for Bluetooth broadcasts…<br />
+      Nothing yet? Trackers pause between broadcasts and go quiet while connected to their owner's
+      phone. Give it a minute — and check the tip in <b>Help &amp; setup</b>.
+    </div>
+
+    <div id="device-list"></div>
+  </section>
+
+  <!-- ========================================================= TRACKING -->
+  <section id="screen-track" class="hidden">
+    <div class="track-head">
+      <button id="btn-back" class="btn small">← Back</button>
+      <div id="track-name"></div>
+      <div id="track-badges"></div>
+    </div>
+
+    <div id="radar">
+      <span class="pulse"></span>
+      <span class="pulse"></span>
+      <span class="ring-static"></span>
+      <span class="core-dot"></span>
+      <div class="radar-center">
+        <div id="track-distance">—</div>
+        <div id="track-band">Waiting for a signal…</div>
+      </div>
+    </div>
+
+    <div class="stats">
+      <div class="stat">
+        <div class="stat-label">Signal</div>
+        <div id="track-rssi" class="stat-value">—</div>
+      </div>
+      <div class="stat">
+        <div class="stat-label">Last blip</div>
+        <div id="track-raw" class="stat-value">—</div>
+      </div>
+      <div class="stat">
+        <div class="stat-label">Trend</div>
+        <div id="track-trend" class="stat-value">—</div>
+      </div>
+      <div class="stat">
+        <div class="stat-label">Heard</div>
+        <div id="track-ago" class="stat-value">—</div>
+      </div>
+    </div>
+
+    <canvas id="spark" height="64"></canvas>
+
+    <div id="track-hint" class="hint"></div>
+
+    <div class="controls">
+      <button id="btn-sound" class="btn">🔇 Sound off</button>
+      <button id="btn-vibrate" class="btn active">📳 Vibrate on</button>
+      <button id="btn-calibrate" class="btn">🎛 Calibrate</button>
+    </div>
+
+    <div id="calibrate-panel" class="calibrate hidden">
+      <div class="cal-row">
+        <label for="inp-tx">Signal at 1 m / 3 ft (dBm)</label>
+        <input type="number" id="inp-tx" min="-80" max="-30" step="1" />
+      </div>
+      <div class="cal-row">
+        <label for="inp-n">Environment (open&nbsp;2.0 ↔ cluttered&nbsp;3.0)</label>
+        <input type="range" id="inp-n" min="1.8" max="3.2" step="0.1" />
+        <span id="n-out"></span>
+      </div>
+      <button id="btn-cal-1m" class="btn small">📏 I'm ~1 m / 3 ft away — calibrate</button>
+    </div>
+  </section>
+
+  <!-- ============================================================ HELP -->
+  <dialog id="modal-help">
+    <div class="modal-head">
+      <h2>Help &amp; setup</h2>
+      <button id="btn-help-close" class="btn small">Close</button>
+    </div>
+    <div id="help-content"></div>
+  </dialog>
+
+  <div id="toast" role="status"></div>
+
+  <footer>
+    <a id="footer-demo-link" href="?demo=1">Try demo mode (fake signals)</a><br />
+    Runs entirely on your device — no data leaves your network.
+  </footer>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>
