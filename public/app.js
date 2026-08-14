@@ -60,6 +60,8 @@ let leScan = null;
 const watchedDevices = [];
 let scanStartedAt = null;
 let lastAdvertAt = null;
+let scanError = null; // persistent, user-visible reason the last scan attempt failed
+let adapterAvailable = null; // getAvailability() result: true/false, null = unknown
 
 let tracking = null; // { auto: bool, targetId: string|null }
 let lastBandIdx = null;
@@ -148,6 +150,9 @@ const els = {
   toast: $('toast'),
   footerDemoLink: $('footer-demo-link'),
 };
+
+const DEFAULT_EMPTY_HTML = els.scanEmpty.innerHTML;
+let emptyStateFiltered = false;
 
 /* ----------------------------------------------------------------- toast */
 
@@ -265,9 +270,10 @@ async function startScanning() {
     return;
   }
   if (!support.scanning) {
-    showToast(
-      'This browser doesn’t have BLE scanning switched on yet — it’s one Chrome flag. Follow the laptop/desktop steps in Help, hit Relaunch, then try again.'
-    );
+    scanError =
+      'Scanning isn’t enabled in this browser yet — open Help & setup and follow the laptop/desktop steps (one Chrome flag, then a full Relaunch).';
+    showToast(scanError);
+    renderList();
     openHelp();
     return;
   }
@@ -279,12 +285,16 @@ async function startScanning() {
     // remove-then-add so a restarted scan never double-registers the listener
     navigator.bluetooth.removeEventListener('advertisementreceived', onAdvert);
     navigator.bluetooth.addEventListener('advertisementreceived', onAdvert);
+    scanError = null;
     mode = 'scan';
     scanStartedAt = performance.now();
     renderControls();
+    showToast('Scanning started — devices appear below as they broadcast.', 4000);
   } catch (err) {
     console.error(err);
-    showToast(explainError(err));
+    scanError = explainError(err);
+    showToast(scanError);
+    renderList();
   }
 }
 
@@ -316,6 +326,7 @@ async function addWatchedDevice() {
 }
 
 function stopScanning() {
+  scanError = null;
   if (demoTimer) {
     clearInterval(demoTimer);
     demoTimer = null;
@@ -469,7 +480,22 @@ function renderList() {
     ? `${devices.size} device${devices.size === 1 ? '' : 's'} heard · ${findMyCount} Find My`
     : '';
 
-  els.scanEmpty.classList.toggle('hidden', list.length > 0 || mode === null);
+  // If the Find My filter is hiding everything that was heard, say so —
+  // otherwise a working scan looks broken.
+  const hiddenByFilter = list.length === 0 && devices.size > 0 && settings.findMyOnly;
+  if (hiddenByFilter) {
+    els.scanEmpty.textContent = `${devices.size} device${
+      devices.size === 1 ? ' is' : 's are'
+    } being hidden by the “Find My only” filter — uncheck it above to see everything broadcasting.`;
+    emptyStateFiltered = true;
+  } else if (emptyStateFiltered) {
+    emptyStateFiltered = false;
+    els.scanEmpty.innerHTML = DEFAULT_EMPTY_HTML;
+  }
+  els.scanEmpty.classList.toggle(
+    'hidden',
+    !hiddenByFilter && (list.length > 0 || mode === null)
+  );
 
   const rows = list
     .map((rec) => {
@@ -494,20 +520,22 @@ function renderList() {
     .join('');
   els.deviceList.innerHTML = rows;
 
-  // Stall detection: scanning but the airwaves went quiet.
-  let stalled = false;
-  if (mode && mode !== 'demo' && scanStartedAt) {
+  // Problem / stall banner. A failed scan attempt stays on screen until the
+  // next attempt succeeds — a vanished toast is easy to miss.
+  let stallText = null;
+  if (scanError && mode === null) {
+    stallText = scanError;
+  } else if (mode && mode !== 'demo' && scanStartedAt) {
     if (!lastAdvertAt && now - scanStartedAt > 8000) {
-      stalled = true;
-      els.scanStalledText.textContent =
+      stallText =
         'No broadcasts heard yet. Is Bluetooth turned on for this device? On a Mac, also check System Settings → Privacy & Security → Bluetooth and allow this browser, then relaunch it. Trackers also go silent while connected to their owner’s phone — see Help & setup.';
     } else if (lastAdvertAt && now - lastAdvertAt > 6000) {
-      stalled = true;
-      els.scanStalledText.textContent =
+      stallText =
         'The signal stream went quiet (browsers pause scans when the tab is hidden). Tap Restart to resume.';
     }
   }
-  els.scanStalled.classList.toggle('hidden', !stalled);
+  if (stallText) els.scanStalledText.textContent = stallText;
+  els.scanStalled.classList.toggle('hidden', !stallText);
 }
 
 /* -------------------------------------------------------------- tracking */
@@ -579,7 +607,9 @@ function updateTracker() {
     els.trackTrend.className = 'stat-value';
     els.trackAgo.textContent = '—';
     els.trackHint.innerHTML =
-      'Tip: trackers stay <b>silent while connected to their owner’s iPhone</b>. Turn OFF Bluetooth on that iPhone (Settings → Bluetooth) and the card starts broadcasting within a minute or two.';
+      mode === null
+        ? '⚠️ <b>No scan is running</b> (the pill top-right says Idle). Tap Back, then <b>Start scanning</b> — it should turn green and say Scanning.'
+        : 'Tip: trackers stay <b>silent while connected to their owner’s iPhone</b>. Turn OFF Bluetooth on that iPhone (Settings → Bluetooth) and the card starts broadcasting within a minute or two.';
     return;
   }
 
@@ -811,7 +841,23 @@ function buildHelpHtml() {
   const origin = location.origin;
   const flagExp = 'chrome://flags/#enable-experimental-web-platform-features';
   const flagInsecure = 'chrome://flags/#unsafely-treat-insecure-origin-as-secure';
+  const check = (ok) => (ok === true ? '✅' : ok === false ? '❌' : '❓');
   return `
+  <h3>🔎 This browser, right now</h3>
+  <ul>
+    <li>${check(support.secure)} Secure context</li>
+    <li>${check(support.bluetooth)} Web Bluetooth API</li>
+    <li>${check(support.scanning)} Passive scanning${
+      support.scanning ? '' : ' — <b>this is what “Start scanning” needs: the Chrome flag below + full Relaunch</b>'
+    }</li>
+    <li>${check(support.watching)} Per-device watching</li>
+    <li>${check(adapterAvailable)} Bluetooth adapter reachable${
+      adapterAvailable === false
+        ? ' — <b>turn Bluetooth on, and on a Mac allow this browser under System Settings → Privacy &amp; Security → Bluetooth</b>'
+        : ''
+    }</li>
+  </ul>
+
   <h3>📱 Android phone (best mobile option)</h3>
   <ol>
     <li>In Chrome, open ${chip(flagExp)} → set <b>Experimental Web Platform features</b> to <b>Enabled</b>.</li>
@@ -921,7 +967,14 @@ function bindEvents() {
   els.btnAddDevice.addEventListener('click', addWatchedDevice);
   els.btnStop.addEventListener('click', stopScanning);
   els.btnRestartScan.addEventListener('click', restartScan);
-  els.btnAuto.addEventListener('click', () => startTracking(null, { auto: true }));
+  els.btnAuto.addEventListener('click', async () => {
+    // Tracking is useless without a running scan — start one automatically.
+    if (mode === null) {
+      await startScanning();
+      if (mode === null) return; // scan didn't start; the reason is shown on screen
+    }
+    startTracking(null, { auto: true });
+  });
 
   els.chkFindMyOnly.checked = !!settings.findMyOnly;
   els.chkFindMyOnly.addEventListener('change', () => {
@@ -1046,8 +1099,8 @@ async function init() {
 
   if (!DEMO && support.bluetooth && navigator.bluetooth.getAvailability) {
     try {
-      const available = await navigator.bluetooth.getAvailability();
-      els.adapterNote.classList.toggle('hidden', available);
+      adapterAvailable = await navigator.bluetooth.getAvailability();
+      els.adapterNote.classList.toggle('hidden', adapterAvailable);
     } catch {
       /* leave hidden */
     }
