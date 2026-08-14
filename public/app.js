@@ -62,6 +62,8 @@ const watchedDevices = [];
 let scanStartedAt = null;
 let lastAdvertAt = null;
 let scanError = null; // persistent, user-visible reason the last scan attempt failed
+let bannerForce = false; // show "Try passive scan anyway" in the problem banner
+let bannerReload = false; // show "Reload page" in the problem banner (wedged tab)
 let adapterAvailable = null; // getAvailability() result: true/false, null = unknown
 
 let tracking = null; // { auto: bool, targetId: string|null }
@@ -116,6 +118,8 @@ const els = {
   scanStalled: $('scan-stalled'),
   scanStalledText: $('scan-stalled-text'),
   btnRestartScan: $('btn-restart-scan'),
+  btnForceScan: $('btn-force-scan'),
+  btnReloadPage: $('btn-reload-page'),
   scanCounts: $('scan-counts'),
   tipCard: $('tip-card'),
   btnTipDismiss: $('btn-tip-dismiss'),
@@ -169,8 +173,8 @@ function explainError(err) {
   const name = err && err.name;
   if (name === 'TimeoutError') {
     return isMac
-      ? 'Chrome took the scan permission but never started delivering results — a known Chrome-on-macOS gap in passive scanning. Use “＋ Add one device” instead: make the tracker broadcast (owner iPhone’s Bluetooth OFF, wait a minute), tap ＋ Add one device, and pick the strongest unnamed entry — add several if unsure; Find My ones get badged automatically.'
-      : 'The scan never started (timed out). Try once more — and if it keeps happening, use “＋ Add one device” instead; tracking works the same.';
+      ? 'Chrome took the scan permission but never started delivering results — a known Chrome-on-macOS gap in passive scanning. Reload this page (the stuck request jams this tab’s Bluetooth), then use “＋ Add one device” and pick the strongest unnamed entry — add several if unsure; Find My ones get badged automatically.'
+      : 'The scan never started (timed out), and the stuck request can jam this tab’s Bluetooth. Reload the page, then try again — or use “＋ Add one device” instead; tracking works the same.';
   }
   if (name === 'NotAllowedError') {
     return 'Bluetooth permission was blocked. Tap the button again and choose “Allow”. If no prompt appears, check this site’s permissions in browser settings.';
@@ -275,28 +279,24 @@ const SCAN_START_TIMEOUT_MS = 8000;
 // requestLEScan is known to hang forever on some platforms (notably Chrome on
 // macOS): the permission chip appears, the user allows, and the promise never
 // settles. Race it against a timeout so the UI can fail loudly with a
-// workaround instead of freezing.
-function requestLEScanWithTimeout(options, ms) {
+// workaround instead of freezing. onLate handles a success that arrives after
+// we already gave up, so a zombie result can be disposed of.
+function withTimeout(promise, ms, onLate) {
   return new Promise((resolve, reject) => {
     let settled = false;
     const timer = setTimeout(() => {
       settled = true;
-      reject(new DOMException('Scan start timed out', 'TimeoutError'));
+      reject(new DOMException('Timed out', 'TimeoutError'));
     }, ms);
-    navigator.bluetooth.requestLEScan(options).then(
-      (scan) => {
+    promise.then(
+      (value) => {
         clearTimeout(timer);
         if (settled) {
-          // Late success after we already gave up — don't leak a zombie scan.
-          try {
-            scan.stop();
-          } catch {
-            /* ignore */
-          }
+          if (onLate) onLate(value);
           return;
         }
         settled = true;
-        resolve(scan);
+        resolve(value);
       },
       (err) => {
         clearTimeout(timer);
@@ -309,7 +309,7 @@ function requestLEScanWithTimeout(options, ms) {
   });
 }
 
-async function startScanning() {
+async function startScanning(force = false) {
   if (DEMO) {
     startDemo();
     return;
@@ -322,17 +322,43 @@ async function startScanning() {
     openHelp();
     return;
   }
+  // On macOS, Chrome's passive scan is broken in a dangerous way: the request
+  // hangs forever AND blocks every later Bluetooth request in this tab (which
+  // makes the picker button look dead too). So on Macs we don't even try
+  // unless the user explicitly forces it — the picker is the Mac path.
+  if (isMac && !force) {
+    scanError =
+      'Chrome on macOS can’t passive-scan (a long-standing Chrome gap; trying can even jam this tab’s Bluetooth until reload). “＋ Add one device” is the Mac path — it opens Chrome’s device picker, and tracking works identically.';
+    bannerForce = true;
+    bannerReload = false;
+    showToast('On Macs, use “＋ Add one device” — Chrome’s passive scanning is broken on macOS.', 7000);
+    renderList();
+    return;
+  }
   els.btnScan.disabled = true;
   els.statusPill.textContent = 'Starting…';
   try {
-    leScan = await requestLEScanWithTimeout(
-      { acceptAllAdvertisements: true, keepRepeatedDevices: true },
-      SCAN_START_TIMEOUT_MS
+    leScan = await withTimeout(
+      navigator.bluetooth.requestLEScan({
+        acceptAllAdvertisements: true,
+        keepRepeatedDevices: true,
+      }),
+      SCAN_START_TIMEOUT_MS,
+      (scan) => {
+        // Late success after we already gave up — don't leak a zombie scan.
+        try {
+          scan.stop();
+        } catch {
+          /* ignore */
+        }
+      }
     );
     // remove-then-add so a restarted scan never double-registers the listener
     navigator.bluetooth.removeEventListener('advertisementreceived', onAdvert);
     navigator.bluetooth.addEventListener('advertisementreceived', onAdvert);
     scanError = null;
+    bannerForce = false;
+    bannerReload = false;
     mode = 'scan';
     scanStartedAt = performance.now();
     renderControls();
@@ -340,6 +366,10 @@ async function startScanning() {
   } catch (err) {
     console.error(err);
     scanError = explainError(err);
+    bannerForce = false;
+    // A timed-out request stays pending inside Chrome and blocks all further
+    // Bluetooth calls in this tab — only a page reload clears it.
+    bannerReload = err && err.name === 'TimeoutError';
     showToast(scanError, 9000);
     renderControls();
     renderList();
@@ -348,6 +378,7 @@ async function startScanning() {
 
 async function addWatchedDevice() {
   try {
+    showToast('Opening Chrome’s device picker…', 2500);
     const device = await navigator.bluetooth.requestDevice({ acceptAllDevices: true });
     if (watchedDevices.includes(device)) {
       await device.watchAdvertisements();
@@ -372,9 +403,21 @@ async function addWatchedDevice() {
       6000
     );
   } catch (err) {
-    if (err && err.name === 'NotFoundError') return; // user closed the chooser
+    // Only a genuine chooser dismissal is silent. Chrome also uses
+    // NotFoundError for "a request is already in progress" (a wedged tab) —
+    // swallowing that made this button look dead.
+    if (err && err.name === 'NotFoundError' && /cancel/i.test(err.message || '')) return;
     console.error(err);
-    showToast(explainError(err));
+    if (err && /already in progress|pending/i.test(err.message || '')) {
+      scanError =
+        'Chrome says another Bluetooth request is still stuck in this tab (a jammed scan attempt does this). Reload the page, then tap ＋ Add one device first.';
+    } else {
+      scanError = explainError(err);
+    }
+    bannerForce = false;
+    bannerReload = true; // reload is the safe generic remedy for a wedged tab
+    showToast(scanError, 9000);
+    renderList();
   }
 }
 
@@ -576,7 +619,7 @@ function renderList() {
   // Problem / stall banner. A failed scan attempt stays on screen until the
   // next attempt succeeds — a vanished toast is easy to miss.
   let stallText = null;
-  if (scanError && mode === null) {
+  if (scanError) {
     stallText = scanError;
   } else if (mode && mode !== 'demo' && scanStartedAt) {
     if (!lastAdvertAt && now - scanStartedAt > 8000) {
@@ -590,6 +633,9 @@ function renderList() {
   }
   if (stallText) els.scanStalledText.textContent = stallText;
   els.scanStalled.classList.toggle('hidden', !stallText);
+  els.btnForceScan.classList.toggle('hidden', !(stallText && bannerForce));
+  els.btnReloadPage.classList.toggle('hidden', !(stallText && bannerReload));
+  els.btnRestartScan.classList.toggle('hidden', !!(bannerForce || bannerReload));
 }
 
 /* -------------------------------------------------------------- tracking */
@@ -925,14 +971,14 @@ function buildHelpHtml() {
   <ol>
     <li>Open ${chip(flagExp)} → <b>Enabled</b> → hit the blue <b>Relaunch</b> button (Chrome must fully restart for it to take effect). <code>localhost</code> needs no other setup.</li>
     <li><b>Mac only:</b> macOS must also allow Chrome to use Bluetooth — System Settings → Privacy &amp; Security → <b>Bluetooth</b> → make sure your browser is listed and ON, then relaunch it.</li>
-    <li><b>Mac reality check:</b> Chrome on macOS often accepts the scan permission but never delivers passive-scan results (a long-standing Chrome gap — “Start scanning” stalls or times out). Not your fault, nothing to fix: use <b>＋ Add one device</b> instead, workflow below. Tracking works identically.</li>
+    <li><b>Mac reality check:</b> Chrome on macOS can't passive-scan (a long-standing Chrome gap), and a stuck scan attempt even jams this tab's other Bluetooth calls until you reload. Not your fault, nothing to fix: on Macs this app skips passive scanning and the path is <b>＋ Add one device</b>, workflow below. Tracking works identically. If any button ever seems dead, reload the page first.</li>
     <li>A laptop you carry room-to-room works great as the radar.</li>
   </ol>
 
   <h3>🖱 The “＋ Add one device” picker (works on Macs)</h3>
   <ol>
     <li>First make the tracker broadcast: turn OFF Bluetooth on the iPhone it's paired to and wait 1–2 minutes.</li>
-    <li>Tap <b>＋ Add one device</b>. Chrome opens a picker of everything currently broadcasting, with live signal bars.</li>
+    <li>Tap <b>＋ Add one device</b>. Chrome opens a picker of everything currently broadcasting, with live signal bars. (If no picker appears, reload the page — Cmd+R — and tap it again before anything else.)</li>
     <li>Your tracker shows as an <i>unnamed / unknown device</i>. With the tracker nearby it'll be among the strongest entries. Unsure which? Add several, one at a time — anything sending Find My frames gets the green <span class="badge badge-findmy">Find My</span> badge in the list within seconds.</li>
     <li>Then tap <b>🎯 Track strongest Find My signal</b> (or tap a row to lock it) and hunt as usual.</li>
   </ol>
@@ -1026,10 +1072,13 @@ function bindEvents() {
 
   els.btnRecheck.addEventListener('click', () => location.reload());
 
-  els.btnScan.addEventListener('click', startScanning);
+  // Wrapped: the click event must not leak into startScanning's force param.
+  els.btnScan.addEventListener('click', () => startScanning());
   els.btnAddDevice.addEventListener('click', addWatchedDevice);
   els.btnStop.addEventListener('click', stopScanning);
   els.btnRestartScan.addEventListener('click', restartScan);
+  els.btnForceScan.addEventListener('click', () => startScanning(true));
+  els.btnReloadPage.addEventListener('click', () => location.reload());
   els.btnAuto.addEventListener('click', async () => {
     // Tracking is useless without a running scan — start one automatically.
     if (mode === null) {
