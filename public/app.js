@@ -40,6 +40,7 @@ const ua = navigator.userAgent || '';
 const isIOS =
   /iPhone|iPad|iPod/i.test(ua) ||
   (/Macintosh/i.test(ua) && navigator.maxTouchPoints > 1); // iPadOS pretends to be a Mac
+const isMac = !isIOS && /Mac/i.test(navigator.platform || ua);
 
 const support = {
   secure: window.isSecureContext === true,
@@ -166,6 +167,11 @@ function showToast(msg, ms = 6000) {
 
 function explainError(err) {
   const name = err && err.name;
+  if (name === 'TimeoutError') {
+    return isMac
+      ? 'Chrome took the scan permission but never started delivering results — a known Chrome-on-macOS gap in passive scanning. Use “＋ Add one device” instead: make the tracker broadcast (owner iPhone’s Bluetooth OFF, wait a minute), tap ＋ Add one device, and pick the strongest unnamed entry — add several if unsure; Find My ones get badged automatically.'
+      : 'The scan never started (timed out). Try once more — and if it keeps happening, use “＋ Add one device” instead; tracking works the same.';
+  }
   if (name === 'NotAllowedError') {
     return 'Bluetooth permission was blocked. Tap the button again and choose “Allow”. If no prompt appears, check this site’s permissions in browser settings.';
   }
@@ -264,6 +270,45 @@ function onAdvert(event) {
 
 /* -------------------------------------------------------------- scanning */
 
+const SCAN_START_TIMEOUT_MS = 8000;
+
+// requestLEScan is known to hang forever on some platforms (notably Chrome on
+// macOS): the permission chip appears, the user allows, and the promise never
+// settles. Race it against a timeout so the UI can fail loudly with a
+// workaround instead of freezing.
+function requestLEScanWithTimeout(options, ms) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      settled = true;
+      reject(new DOMException('Scan start timed out', 'TimeoutError'));
+    }, ms);
+    navigator.bluetooth.requestLEScan(options).then(
+      (scan) => {
+        clearTimeout(timer);
+        if (settled) {
+          // Late success after we already gave up — don't leak a zombie scan.
+          try {
+            scan.stop();
+          } catch {
+            /* ignore */
+          }
+          return;
+        }
+        settled = true;
+        resolve(scan);
+      },
+      (err) => {
+        clearTimeout(timer);
+        if (!settled) {
+          settled = true;
+          reject(err);
+        }
+      }
+    );
+  });
+}
+
 async function startScanning() {
   if (DEMO) {
     startDemo();
@@ -277,11 +322,13 @@ async function startScanning() {
     openHelp();
     return;
   }
+  els.btnScan.disabled = true;
+  els.statusPill.textContent = 'Starting…';
   try {
-    leScan = await navigator.bluetooth.requestLEScan({
-      acceptAllAdvertisements: true,
-      keepRepeatedDevices: true,
-    });
+    leScan = await requestLEScanWithTimeout(
+      { acceptAllAdvertisements: true, keepRepeatedDevices: true },
+      SCAN_START_TIMEOUT_MS
+    );
     // remove-then-add so a restarted scan never double-registers the listener
     navigator.bluetooth.removeEventListener('advertisementreceived', onAdvert);
     navigator.bluetooth.addEventListener('advertisementreceived', onAdvert);
@@ -293,7 +340,8 @@ async function startScanning() {
   } catch (err) {
     console.error(err);
     scanError = explainError(err);
-    showToast(scanError);
+    showToast(scanError, 9000);
+    renderControls();
     renderList();
   }
 }
@@ -316,8 +364,13 @@ async function addWatchedDevice() {
     await device.watchAdvertisements();
     watchedDevices.push(device);
     if (mode !== 'scan') mode = 'watch';
+    scanError = null;
     scanStartedAt = scanStartedAt || performance.now();
     renderControls();
+    showToast(
+      `Watching “${device.name || 'unnamed device'}” — its signal shows in the list below. Add as many as you like; Find My broadcasts get badged automatically.`,
+      6000
+    );
   } catch (err) {
     if (err && err.name === 'NotFoundError') return; // user closed the chooser
     console.error(err);
@@ -527,8 +580,9 @@ function renderList() {
     stallText = scanError;
   } else if (mode && mode !== 'demo' && scanStartedAt) {
     if (!lastAdvertAt && now - scanStartedAt > 8000) {
-      stallText =
-        'No broadcasts heard yet. Is Bluetooth turned on for this device? On a Mac, also check System Settings → Privacy & Security → Bluetooth and allow this browser, then relaunch it. Trackers also go silent while connected to their owner’s phone — see Help & setup.';
+      stallText = isMac
+        ? 'Scan is on but nothing is coming through — on macOS Chrome this is a known gap in passive scanning. Use “＋ Add one device” instead (Help & setup has the picker workflow).'
+        : 'No broadcasts heard yet. Is Bluetooth turned on for this device? Trackers also go silent while connected to their owner’s phone — see Help & setup.';
     } else if (lastAdvertAt && now - lastAdvertAt > 6000) {
       stallText =
         'The signal stream went quiet (browsers pause scans when the tab is hidden). Tap Restart to resume.';
@@ -871,7 +925,16 @@ function buildHelpHtml() {
   <ol>
     <li>Open ${chip(flagExp)} → <b>Enabled</b> → hit the blue <b>Relaunch</b> button (Chrome must fully restart for it to take effect). <code>localhost</code> needs no other setup.</li>
     <li><b>Mac only:</b> macOS must also allow Chrome to use Bluetooth — System Settings → Privacy &amp; Security → <b>Bluetooth</b> → make sure your browser is listed and ON, then relaunch it.</li>
+    <li><b>Mac reality check:</b> Chrome on macOS often accepts the scan permission but never delivers passive-scan results (a long-standing Chrome gap — “Start scanning” stalls or times out). Not your fault, nothing to fix: use <b>＋ Add one device</b> instead, workflow below. Tracking works identically.</li>
     <li>A laptop you carry room-to-room works great as the radar.</li>
+  </ol>
+
+  <h3>🖱 The “＋ Add one device” picker (works on Macs)</h3>
+  <ol>
+    <li>First make the tracker broadcast: turn OFF Bluetooth on the iPhone it's paired to and wait 1–2 minutes.</li>
+    <li>Tap <b>＋ Add one device</b>. Chrome opens a picker of everything currently broadcasting, with live signal bars.</li>
+    <li>Your tracker shows as an <i>unnamed / unknown device</i>. With the tracker nearby it'll be among the strongest entries. Unsure which? Add several, one at a time — anything sending Find My frames gets the green <span class="badge badge-findmy">Find My</span> badge in the list within seconds.</li>
+    <li>Then tap <b>🎯 Track strongest Find My signal</b> (or tap a row to lock it) and hunt as usual.</li>
   </ol>
 
   <h3>🍎 iPhone &amp; iPad</h3>

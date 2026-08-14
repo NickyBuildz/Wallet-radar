@@ -30,7 +30,7 @@ its **Help & setup** panel walks you through it, but in short:
 
 | Device | What to do |
 |---|---|
-| **Laptop/desktop** (Chrome/Edge) | `chrome://flags/#enable-experimental-web-platform-features` → Enabled → Relaunch. `localhost` needs nothing else. |
+| **Laptop/desktop** (Chrome/Edge) | `chrome://flags/#enable-experimental-web-platform-features` → Enabled → Relaunch. `localhost` needs nothing else. **macOS caveat:** Chrome on Macs often accepts the scan permission but never delivers passive-scan results (a long-standing Chrome gap) — if “Start scanning” times out, use **＋ Add one device** instead (picker mode, works on Macs; tracking is identical). macOS must also allow the browser Bluetooth access (System Settings → Privacy & Security → Bluetooth). |
 | **Android phone** (Chrome) | Same flag as above, **plus** `chrome://flags/#unsafely-treat-insecure-origin-as-secure` → add `http://<your-LAN-IP>:4747` (needed because the page is served over plain HTTP on your LAN). |
 | **iPhone/iPad** | Apple blocks Web Bluetooth in all iOS browsers. Use a laptop or Android device — or try the free “Bluefy – Web BLE Browser” app (its “Add one device” picker mode works; full scanning varies by version). |
 
