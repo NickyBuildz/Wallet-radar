@@ -264,6 +264,13 @@ async function startScanning() {
     startDemo();
     return;
   }
+  if (!support.scanning) {
+    showToast(
+      'This browser doesn’t have BLE scanning switched on yet — it’s one Chrome flag. Follow the laptop/desktop steps in Help, hit Relaunch, then try again.'
+    );
+    openHelp();
+    return;
+  }
   try {
     leScan = await navigator.bluetooth.requestLEScan({
       acceptAllAdvertisements: true,
@@ -493,7 +500,7 @@ function renderList() {
     if (!lastAdvertAt && now - scanStartedAt > 8000) {
       stalled = true;
       els.scanStalledText.textContent =
-        'No broadcasts heard yet. Is Bluetooth turned on for this device? Trackers also go silent while connected to their owner’s phone — see Help & setup.';
+        'No broadcasts heard yet. Is Bluetooth turned on for this device? On a Mac, also check System Settings → Privacy & Security → Bluetooth and allow this browser, then relaunch it. Trackers also go silent while connected to their owner’s phone — see Help & setup.';
     } else if (lastAdvertAt && now - lastAdvertAt > 6000) {
       stalled = true;
       els.scanStalledText.textContent =
@@ -816,7 +823,8 @@ function buildHelpHtml() {
 
   <h3>💻 Laptop / desktop (Chrome or Edge)</h3>
   <ol>
-    <li>Open ${chip(flagExp)} → <b>Enabled</b> → Relaunch. That's it — <code>localhost</code> needs no other setup.</li>
+    <li>Open ${chip(flagExp)} → <b>Enabled</b> → hit the blue <b>Relaunch</b> button (Chrome must fully restart for it to take effect). <code>localhost</code> needs no other setup.</li>
+    <li><b>Mac only:</b> macOS must also allow Chrome to use Bluetooth — System Settings → Privacy &amp; Security → <b>Bluetooth</b> → make sure your browser is listed and ON, then relaunch it.</li>
     <li>A laptop you carry room-to-room works great as the radar.</li>
   </ol>
 
@@ -882,18 +890,15 @@ function renderSupportChecklist() {
 }
 
 function renderControls() {
-  const canScan = DEMO || support.scanning;
-  const canWatch = !DEMO && support.watching;
   const running = mode !== null;
 
-  els.btnScan.disabled = !canScan || (running && mode !== 'watch');
+  // Keep the scan button clickable even when scanning is unsupported —
+  // clicking then explains exactly what's missing instead of doing nothing.
+  els.btnScan.disabled = running && mode !== 'watch';
   els.btnScan.textContent = DEMO ? '▶ Start demo scan' : '▶ Start scanning';
-  els.btnAddDevice.classList.toggle('hidden', !canWatch);
+  els.btnAddDevice.classList.toggle('hidden', DEMO || !support.watching);
   els.btnStop.classList.toggle('hidden', !running);
-  els.noStreamBanner.classList.toggle(
-    'hidden',
-    DEMO || support.scanning || support.watching || !support.bluetooth
-  );
+  els.noStreamBanner.classList.toggle('hidden', DEMO || support.scanning || !support.bluetooth);
   setStatusPill();
 }
 
